@@ -48,6 +48,9 @@ func (s *Store) CreateTask(task *models.PushTask) *models.PushTask {
 	task.UpdatedAt = now
 	task.Status = "active"
 	task.PushCount = 0
+	if task.GrayUserIDs == nil {
+		task.GrayUserIDs = []string{}
+	}
 	s.tasks[task.ID] = task
 	return task
 }
@@ -107,6 +110,12 @@ func (s *Store) UpdateTask(id string, req *models.UpdateTaskRequest) (*models.Pu
 	}
 	if req.Status != nil {
 		task.Status = *req.Status
+	}
+	if req.GrayMode != nil {
+		task.GrayMode = *req.GrayMode
+	}
+	if req.GrayUserIDs != nil {
+		task.GrayUserIDs = *req.GrayUserIDs
 	}
 	task.UpdatedAt = time.Now()
 	return task, nil
@@ -262,4 +271,35 @@ func (s *Store) GetUnreadCount(userID string) int {
 		}
 	}
 	return count
+}
+
+func (s *Store) SetGrayMode(taskID string, enabled bool, grayUserIDs []string) (*models.PushTask, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task, ok := s.tasks[taskID]
+	if !ok {
+		return nil, ErrTaskNotFound
+	}
+	task.GrayMode = enabled
+	if grayUserIDs != nil {
+		task.GrayUserIDs = grayUserIDs
+	}
+	task.UpdatedAt = time.Now()
+	if !enabled {
+		task.FullReleaseAt = &[]time.Time{time.Now()}[0]
+	}
+	return task, nil
+}
+
+func (s *Store) GetEffectiveUserIDs(taskID string) ([]string, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	task, ok := s.tasks[taskID]
+	if !ok {
+		return nil, "not_found"
+	}
+	if task.GrayMode && len(task.GrayUserIDs) > 0 {
+		return task.GrayUserIDs, "gray"
+	}
+	return task.UserIDs, "full"
 }

@@ -94,6 +94,21 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 			inputCount, uniqueCount, inputCount-uniqueCount)
 	}
 
+	var grayUserIDs []string
+	var grayCount int
+	if req.GrayMode {
+		if len(req.GrayUserIDs) == 0 {
+			errResponse(w, http.StatusBadRequest, "gray_user_ids is required when gray_mode is true")
+			return
+		}
+		grayUserIDs, _, grayCount = validateAndDeduplicateUserIDs(req.GrayUserIDs)
+		if grayCount == 0 {
+			errResponse(w, http.StatusBadRequest, "no valid gray_user_ids after deduplication")
+			return
+		}
+		log.Printf("[Handler] CreateTask: gray mode enabled with %d gray users", grayCount)
+	}
+
 	if req.Repeat && strings.TrimSpace(req.CronExpr) == "" {
 		errResponse(w, http.StatusBadRequest, "cron_expr is required for repeat task")
 		return
@@ -104,14 +119,16 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	task := &models.PushTask{
-		Name:     req.Name,
-		UserIDs:  userIDs,
-		Title:    req.Title,
-		Content:  req.Content,
-		Type:     req.Type,
-		CronExpr: req.CronExpr,
-		PushAt:   req.PushAt,
-		Repeat:   req.Repeat,
+		Name:        req.Name,
+		UserIDs:     userIDs,
+		Title:       req.Title,
+		Content:     req.Content,
+		Type:        req.Type,
+		CronExpr:    req.CronExpr,
+		PushAt:      req.PushAt,
+		Repeat:      req.Repeat,
+		GrayMode:    req.GrayMode,
+		GrayUserIDs: grayUserIDs,
 	}
 
 	created := h.store.CreateTask(task)
@@ -123,11 +140,17 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Handler] Task %s created with %d unique users", created.ID, uniqueCount)
 
-	okResponse(w, map[string]interface{}{
-		"task":            created,
-		"user_count":      uniqueCount,
+	resp := map[string]interface{}{
+		"task":             created,
+		"user_count":       uniqueCount,
 		"input_user_count": inputCount,
-	})
+		"gray_mode":        req.GrayMode,
+	}
+	if req.GrayMode {
+		resp["gray_user_count"] = grayCount
+	}
+
+	okResponse(w, resp)
 }
 
 func (h *Handler) GetTask(w http.ResponseWriter, r *http.Request) {
@@ -325,6 +348,110 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) HandleGrayRelease(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		errResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	id := extractPathID(r.URL.Path, "/api/tasks/")
+	action := extractPathID(r.URL.Path, "/api/tasks/"+id+"/")
+	if id == "" || action != "gray-release" {
+		errResponse(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+
+	var req models.GrayReleaseRequest
+	if err := parseJSON(r, &req); err != nil {
+		errResponse(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	task, err := h.store.GetTask(id)
+	if err != nil {
+		if errors.Is(err, storage.ErrTaskNotFound) {
+			errResponse(w, http.StatusNotFound, err.Error())
+			return
+		}
+		errResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	switch req.Action {
+	case "enable":
+		if len(req.GrayUserIDs) == 0 {
+			errResponse(w, http.StatusBadRequest, "gray_user_ids is required for enable action")
+			return
+		}
+		grayUserIDs, _, grayCount := validateAndDeduplicateUserIDs(req.GrayUserIDs)
+		if grayCount == 0 {
+			errResponse(w, http.StatusBadRequest, "no valid gray_user_ids")
+			return
+		}
+		task, err = h.store.SetGrayMode(id, true, grayUserIDs)
+		if err != nil {
+			errResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := h.scheduler.RescheduleTask(id); err != nil {
+			errResponse(w, http.StatusBadRequest, "reschedule task failed: "+err.Error())
+			return
+		}
+		log.Printf("[Handler] Task %s gray mode enabled with %d users", id, grayCount)
+		okResponse(w, map[string]interface{}{
+			"task":            task,
+			"action":          "enabled",
+			"gray_user_count": grayCount,
+		})
+
+	case "disable":
+		task, err = h.store.SetGrayMode(id, false, nil)
+		if err != nil {
+			errResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := h.scheduler.RescheduleTask(id); err != nil {
+			errResponse(w, http.StatusBadRequest, "reschedule task failed: "+err.Error())
+			return
+		}
+		log.Printf("[Handler] Task %s gray mode disabled, full release to %d users", id, len(task.UserIDs))
+		okResponse(w, map[string]interface{}{
+			"task":       task,
+			"action":     "disabled",
+			"full_release": true,
+			"user_count": len(task.UserIDs),
+		})
+
+	case "update_users":
+		if len(req.GrayUserIDs) == 0 {
+			errResponse(w, http.StatusBadRequest, "gray_user_ids is required for update_users action")
+			return
+		}
+		if !task.GrayMode {
+			errResponse(w, http.StatusBadRequest, "task is not in gray mode, enable first")
+			return
+		}
+		grayUserIDs, _, grayCount := validateAndDeduplicateUserIDs(req.GrayUserIDs)
+		if grayCount == 0 {
+			errResponse(w, http.StatusBadRequest, "no valid gray_user_ids")
+			return
+		}
+		task, err = h.store.SetGrayMode(id, true, grayUserIDs)
+		if err != nil {
+			errResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		log.Printf("[Handler] Task %s gray users updated to %d users", id, grayCount)
+		okResponse(w, map[string]interface{}{
+			"task":            task,
+			"action":          "updated",
+			"gray_user_count": grayCount,
+		})
+
+	default:
+		errResponse(w, http.StatusBadRequest, "invalid action, must be one of: enable, disable, update_users")
+	}
+}
+
 func extractPathID(path, prefix string) string {
 	rest := strings.TrimPrefix(path, prefix)
 	if rest == path {
@@ -335,4 +462,21 @@ func extractPathID(path, prefix string) string {
 		return rest
 	}
 	return rest[:idx]
+}
+
+func validateAndDeduplicateUserIDs(userIDs []string) ([]string, int, int) {
+	inputCount := len(userIDs)
+	seen := make(map[string]bool, inputCount)
+	result := make([]string, 0, inputCount)
+	for _, uid := range userIDs {
+		uid = strings.TrimSpace(uid)
+		if uid == "" {
+			continue
+		}
+		if !seen[uid] {
+			seen[uid] = true
+			result = append(result, uid)
+		}
+	}
+	return result, inputCount, len(result)
 }

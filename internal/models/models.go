@@ -28,6 +28,9 @@ type PushTask struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 	LastPushAt  *time.Time `json:"last_push_at,omitempty"`
 	PushCount   int       `json:"push_count"`
+	GrayMode    bool      `json:"gray_mode"`
+	GrayUserIDs []string  `json:"gray_user_ids,omitempty"`
+	FullReleaseAt *time.Time `json:"full_release_at,omitempty"`
 }
 
 type CreateTaskRequest struct {
@@ -39,6 +42,8 @@ type CreateTaskRequest struct {
 	CronExpr string    `json:"cron_expr"`
 	PushAt   *time.Time `json:"push_at"`
 	Repeat   bool      `json:"repeat"`
+	GrayMode bool      `json:"gray_mode"`
+	GrayUserIDs []string `json:"gray_user_ids"`
 }
 
 type UpdateTaskRequest struct {
@@ -52,6 +57,13 @@ type UpdateTaskRequest struct {
 	ClearPushAt bool      `json:"clear_push_at"`
 	Repeat     *bool      `json:"repeat"`
 	Status     *string    `json:"status"`
+	GrayMode   *bool      `json:"gray_mode"`
+	GrayUserIDs *[]string `json:"gray_user_ids"`
+}
+
+type GrayReleaseRequest struct {
+	Action     string   `json:"action"`
+	GrayUserIDs []string `json:"gray_user_ids,omitempty"`
 }
 
 type Response struct {

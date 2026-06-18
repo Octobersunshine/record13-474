@@ -57,6 +57,12 @@ func main() {
 			} else {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			}
+		} else if len(parts) == 2 && parts[1] == "gray-release" {
+			if r.Method == http.MethodPost {
+				h.HandleGrayRelease(w, r)
+			} else {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
 		} else {
 			http.Error(w, "not found", http.StatusNotFound)
 		}

@@ -123,8 +123,15 @@ func (s *Scheduler) ExecuteTask(taskID string) {
 		return
 	}
 
-	totalUsers := len(task.UserIDs)
-	log.Printf("[Scheduler] Executing task %s: %s, pushing to %d users", taskID, task.Name, totalUsers)
+	userIDs, mode := s.store.GetEffectiveUserIDs(taskID)
+	totalUsers := len(userIDs)
+
+	modeText := "full release"
+	if mode == "gray" {
+		modeText = "gray mode"
+	}
+
+	log.Printf("[Scheduler] Executing task %s: %s, %s, pushing to %d users", taskID, task.Name, modeText, totalUsers)
 
 	notifType := task.Type
 	if notifType == "" {
@@ -144,7 +151,7 @@ func (s *Scheduler) ExecuteTask(taskID string) {
 		if end > totalUsers {
 			end = totalUsers
 		}
-		batch := task.UserIDs[i:end]
+		batch := userIDs[i:end]
 		notifs := s.store.BatchCreateNotifications(batch, task.Title, task.Content, notifType, taskID)
 		pushedCount += len(notifs)
 		log.Printf("[Scheduler] Task %s batch %d-%d: pushed %d notifications", taskID, i, end, len(notifs))
@@ -152,7 +159,7 @@ func (s *Scheduler) ExecuteTask(taskID string) {
 
 	s.store.IncrementTaskPush(taskID)
 
-	log.Printf("[Scheduler] Task %s completed: %d/%d users pushed", taskID, pushedCount, totalUsers)
+	log.Printf("[Scheduler] Task %s completed (%s): %d/%d users pushed", taskID, modeText, pushedCount, totalUsers)
 
 	if !task.Repeat {
 		_, err = s.store.UpdateTask(taskID, &models.UpdateTaskRequest{
