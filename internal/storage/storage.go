@@ -126,6 +126,10 @@ func (s *Store) DeleteTask(id string) error {
 func (s *Store) CreateNotification(userID, title, content, notifType, taskID string) *models.Notification {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.createNotificationLocked(userID, title, content, notifType, taskID)
+}
+
+func (s *Store) createNotificationLocked(userID, title, content, notifType, taskID string) *models.Notification {
 	notif := &models.Notification{
 		ID:        GenerateID(),
 		UserID:    userID,
@@ -140,6 +144,38 @@ func (s *Store) CreateNotification(userID, title, content, notifType, taskID str
 		s.taskNotifIdx[taskID] = append(s.taskNotifIdx[taskID], notif.ID)
 	}
 	return notif
+}
+
+func (s *Store) BatchCreateNotifications(userIDs []string, title, content, notifType, taskID string) []*models.Notification {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	notifs := make([]*models.Notification, 0, len(userIDs))
+	now := time.Now()
+
+	for _, userID := range userIDs {
+		notif := &models.Notification{
+			ID:        GenerateID(),
+			UserID:    userID,
+			Title:     title,
+			Content:   content,
+			Type:      notifType,
+			IsRead:    false,
+			CreatedAt: now,
+		}
+		s.notifications[userID] = append(s.notifications[userID], notif)
+		notifs = append(notifs, notif)
+	}
+
+	if taskID != "" {
+		ids := make([]string, len(notifs))
+		for i, n := range notifs {
+			ids[i] = n.ID
+		}
+		s.taskNotifIdx[taskID] = append(s.taskNotifIdx[taskID], ids...)
+	}
+
+	return notifs
 }
 
 func (s *Store) IncrementTaskPush(taskID string) {

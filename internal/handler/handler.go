@@ -3,12 +3,19 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"strings"
 
 	"push-service/internal/models"
 	"push-service/internal/scheduler"
 	"push-service/internal/storage"
+)
+
+const (
+	maxRequestBodySize = 100 << 20
 )
 
 type Handler struct {
@@ -46,7 +53,19 @@ func errResponse(w http.ResponseWriter, code int, message string) {
 
 func parseJSON(r *http.Request, v interface{}) error {
 	defer r.Body.Close()
-	return json.NewDecoder(r.Body).Decode(v)
+	limitReader := io.LimitReader(r.Body, maxRequestBodySize)
+	decoder := json.NewDecoder(limitReader)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(v); err != nil {
+		if err == io.EOF || strings.Contains(err.Error(), "EOF") {
+			return fmt.Errorf("request body is empty or truncated")
+		}
+		return err
+	}
+	if decoder.More() {
+		return fmt.Errorf("request body exceeds %d MB limit", maxRequestBodySize/(1<<20))
+	}
+	return nil
 }
 
 func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
@@ -63,6 +82,18 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		errResponse(w, http.StatusBadRequest, "user_ids is required")
 		return
 	}
+
+	userIDs, inputCount, uniqueCount := validateAndDeduplicateUserIDs(req.UserIDs)
+	if uniqueCount == 0 {
+		errResponse(w, http.StatusBadRequest, "no valid user_ids after deduplication")
+		return
+	}
+
+	if uniqueCount != inputCount {
+		log.Printf("[Handler] CreateTask: input %d user_ids, %d unique (duplicates: %d)",
+			inputCount, uniqueCount, inputCount-uniqueCount)
+	}
+
 	if req.Repeat && strings.TrimSpace(req.CronExpr) == "" {
 		errResponse(w, http.StatusBadRequest, "cron_expr is required for repeat task")
 		return
@@ -74,7 +105,7 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	task := &models.PushTask{
 		Name:     req.Name,
-		UserIDs:  req.UserIDs,
+		UserIDs:  userIDs,
 		Title:    req.Title,
 		Content:  req.Content,
 		Type:     req.Type,
@@ -90,7 +121,13 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	okResponse(w, created)
+	log.Printf("[Handler] Task %s created with %d unique users", created.ID, uniqueCount)
+
+	okResponse(w, map[string]interface{}{
+		"task":            created,
+		"user_count":      uniqueCount,
+		"input_user_count": inputCount,
+	})
 }
 
 func (h *Handler) GetTask(w http.ResponseWriter, r *http.Request) {

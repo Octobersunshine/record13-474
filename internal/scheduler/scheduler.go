@@ -123,19 +123,36 @@ func (s *Scheduler) ExecuteTask(taskID string) {
 		return
 	}
 
-	log.Printf("[Scheduler] Executing task %s: %s, pushing to %d users", taskID, task.Name, len(task.UserIDs))
+	totalUsers := len(task.UserIDs)
+	log.Printf("[Scheduler] Executing task %s: %s, pushing to %d users", taskID, task.Name, totalUsers)
 
 	notifType := task.Type
 	if notifType == "" {
 		notifType = "system"
 	}
 
-	for _, userID := range task.UserIDs {
-		notif := s.store.CreateNotification(userID, task.Title, task.Content, notifType, taskID)
-		log.Printf("[Scheduler] Created notification %s for user %s", notif.ID, userID)
+	if totalUsers == 0 {
+		log.Printf("[Scheduler] Task %s has no users to push, skipping", taskID)
+		return
+	}
+
+	batchSize := 500
+	pushedCount := 0
+
+	for i := 0; i < totalUsers; i += batchSize {
+		end := i + batchSize
+		if end > totalUsers {
+			end = totalUsers
+		}
+		batch := task.UserIDs[i:end]
+		notifs := s.store.BatchCreateNotifications(batch, task.Title, task.Content, notifType, taskID)
+		pushedCount += len(notifs)
+		log.Printf("[Scheduler] Task %s batch %d-%d: pushed %d notifications", taskID, i, end, len(notifs))
 	}
 
 	s.store.IncrementTaskPush(taskID)
+
+	log.Printf("[Scheduler] Task %s completed: %d/%d users pushed", taskID, pushedCount, totalUsers)
 
 	if !task.Repeat {
 		_, err = s.store.UpdateTask(taskID, &models.UpdateTaskRequest{
